@@ -353,3 +353,179 @@ void dataSourceConnectionPool() throws SQLException, InterruptedException {
 - 애플리케이션에서 DB 트랜잭션을 사용하려면 트랜잭션을 사용하는 동안 같은 커넥션을 유지해야한다. 그래야 같
   은 세션을 사용할 수 있다.
 
+## 4. 스프링과 문제 해결 - 트랜잭션
+
+### 문제점들
+
+#### 애플리케이션 구조
+여러가지 애플리케이션 구조가 있지만, 가장 단순함녀서 많이 사용하는 방법은 역할에 따라 3가지 계층으로 나눈 것이다.
+![img_13.png](img_13.png)
+
+여기서 가장 중요한 곳은 어디일까? 바로 비즈니스 로직이 들어있는 서비스 계층이다. 
+시간이 흘러서 웹과 관련된 부분이 변하고, 데이터 저장 기술을 다른 기술로 변경해도, 비즈니스 로직은 최대한 변경없이 유지되어야 한다.
+
+이렇게 하려면 서비스 계층은 특정 기술에 종속적이지 않게 개발해야 한다.
+그래야 비즈니스 로직을 유지보수 하기도 쉽고, 테스트 하기도 쉽다.
+
+#### 문제 정리
+이전에 개발한 애플리케이션의 문제점은 크게 3가지이다.
+- 트랜잭션 문제
+- 예외 누수 문제
+- JDBC 반복 문제
+
+스프링은 서비스 계층을 순수하게 유지하면서, 지금까지 이야기한 문제들을 해결할 수 있는 다양한 방법과 기술들을 제공한다.
+
+### 트랜잭션 추상화
+
+#### 구현 기술에 따른 트랜잭션 사용법
+- 트랜잭션은 원자적 단위의 비즈니스 로직을 처리하기 위해 사용한다.
+- 구현 기술마다 트랜잭션을 사용하는 방법이 다르다.
+  - JDBC: con.setAutoCommit(false)
+  - JPA: transaction.begin()
+
+트랜잭션을 사용하는 코드는 데이터 접근 기술마다 다르다. 
+JDBC 기술을 사용하다가 JPA 기술로 변경하게 되면 서비스 계층의 코드도 JPA 기술을 사용하도록 함께 수정해야 한다.
+
+#### 트랜잭션 추상화
+트랜잭션 기능을 추상화하면 이 문제를 해결할 수 있다.
+
+#### 트랜잭션 추상화 인터페이스
+```java
+public interface TxManager {
+    begin();
+
+    commit();
+
+    rollback();
+}
+```
+다음과 같이 `TxManager` 인터페이스를 기반으로 각각의 기술에 맞는 구현체를 만들면 된다.
+* `JdbcTxManager` : JDBC 트랜잭션 기능을 제공하는 구현체
+* `JpaTxManager` : JPA 트랜잭션 기능을 제공하는 구현체
+
+#### 트랜잭션 추상화와 의존관계
+![img_14.png](img_14.png)
+
+#### 스프링의 트랜잭션 추상화
+![img_15.png](img_15.png)
+
+### 트랜잰션 동기화
+스프링이 제공하는 트랜잭션 매니저는 크게 2가지 역할을 한다.
+- 트랜잭션 추상화
+- 리소스 동기화
+
+#### 리소스 동기화
+- 트랜잭션을 유지하려면 트랜잭션의 시작부터 끝까지 같은 데이터베이스 커넥션을 유지해아한다.
+- 스프링은 트랜잭션 동기화 매니저를 제공한다. 이것은 쓰레드 로컬(`ThreadLocal`)을 사용해서 커넥션을 동기화해준다. 트랜잭션 매니저는 내부에서 이 트랜잭션 동기화 매니저를 사용한다.
+- 트랜잭션 동기화 매니저는 쓰레드 로컬을 사용하기 때문에 멀티쓰레드 상황에 안전하게 커넥션을 동기화 할 수 있다.
+
+#### 동작 방식
+1. 트랜잭션을 시작하려면 커넥션이 필요하다. 트랜잭션 매니저는 데이터소스를 통해 커넥션을 만들고 트랜잭션을
+   시작한다.
+2. 트랜잭션 매니저는 트랜잭션이 시작된 커넥션을 트랜잭션 동기화 매니저에 보관한다.
+3. 리포지토리는 트랜잭션 동기화 매니저에 보관된 커넥션을 꺼내서 사용한다. 따라서 파라미터로 커넥션을 전달하지 않아도 된다.
+4. 트랜잭션이 종료되면 트랜잭션 매니저는 트랜잭션 동기화 매니저에 보관된 커넥션을 통해 트랜잭션을 종료하고,
+   커넥션도 닫는다.
+
+### 트랜잭션 템플릿
+트랜잭션을 사용하는 로직을 살펴보면 같은 패턴이 반복되는 것을 확인할 수 있다.
+
+#### 트랜잭션 사용 코드
+```java
+//트랜잭션 시작
+TransactionStatus status = transactionManager.getTransaction(new
+DefaultTransactionDefinition());
+
+try {
+ //비즈니스 로직
+    bizLogic(fromId, toId, money);
+    transactionManager.commit(status); //성공시 커밋
+} catch (Exception e){
+    transactionManager.rollback(status); //실패시 롤백
+    throw newIllegalStateException(e);
+}
+```
+
+#### TransactionTemplate
+```java
+public class TransactionTemplate {
+    private PlatformTransactionManager transactionManager;
+
+    public <T> T execute(TransactionCallback<T> action) {..}
+
+    void executeWithoutResult(Consumer<TransactionStatus> action) {..}
+}
+```
+트랜잭션 템플릿의 기본 동작은 다음과 같다.
+* 비즈니스 로직이 정상 수행되면 커밋한다.
+* 언체크 예외가 발생하면 롤백한다. 그 외의 경우 커밋한다. (체크 예외의 경우에는 커밋하는데, 이 부분은 뒤에서 설명한다.)
+
+### 트랜잭션 문제 해결 - 트랜잭션 AOP 이해
+서비스 계층에 순수한 비즈니스 로직만 남기려면 스프링 AOP를 통해 프록시를 도입하면 문제를 깔끔하게 해결할 수 있다.
+
+#### 프록시를 통한 문제 해결
+![img_16.png](img_16.png)
+
+#### 스프링이 제공하는 트랜잭션 AOP
+개발자는 트랜잭션 처리가 필요한 곳에 `@Transactional` 애노테이션만 붙여주면 된다. 스프링의 트랜잭션
+AOP는 이 애노테이션을 인식해서 트랜잭션 프록시를 적용해준다.
+
+### 트랜잭션 문제 해결 - 트랜잭션 AOP 적용
+#### 적용 예시
+```java
+@Transactional
+public void accountTransfer(String fromId, String toId, int money) throws
+SQLException {
+    bizLogic(fromId, toId, money);
+}
+```
+* 순수한 비즈니스 로직만 남기고, 트랜잭션 관련 코드는 모두 제거했다.
+* 스프링이 제공하는 트랜잭션 AOP를 적용하기 위해 @Transactional 애노테이션을 추가했다.
+* @Transactional 애노테이션은 메서드에 붙여도 되고, 클래스에 붙여도 된다. 클래스에 붙이면 외부에서 호출 가능한 public 메서드가 AOP 적용 대상이 된다.
+
+### 트랜잭션 문제 해결 - 트랜잭션 AOP 정리
+
+#### 트랜잭션 AOP 적용 전체 흐름
+![img_17.png](img_17.png)
+
+### 스프링 부트의 자동 리소스 등록
+스프링 부트가 등장하기 이전에는 데이터소스와 트랜잭션 매니저를 개발자가 직접 스프링 빈으로 등록해서 사용했다.
+그런데 스프링 부트로 개발을 시작한 개발자라면 데이터소스나 트랜잭션 매니저를 직접 등록한 적이 없을 것이다.
+
+#### 데이터소스와 트랜잭션 매니저를 스프링 빈으로 직접 등록
+```java
+@Bean
+DataSource dataSource() {
+    return new DriverManagerDataSource(URL, USERNAME, PASSWORD);
+}
+@Bean
+PlatformTransactionManager transactionManager() {
+    return new DataSourceTransactionManager(dataSource());
+}
+```
+기존에는 이렇게 데이터소스와 트랜잭션 매니저를 직접 스프링 빈으로 등록해야 했다.
+그런데 스프링 부트가 나오면서 많은 부분이 자동화되었다.
+
+#### 데이터소스 - 자동 등록
+* 스프링 부트는 데이터소스( DataSource )를 스프링 빈에 자동으로 등록한다.
+* 자동으로 등록되는 스프링 빈 이름: `dataSource`
+* 참고로 개발자가 직접 데이터소스를 빈으로 등록하면 스프링 부트는 데이터소스를 자동으로 등록하지 않는다.
+
+이때 스프링 부트는 다음과 같이 `application.properties` 에 있는 속성을 사용해서 DataSource 를 생성한다.
+그리고 스프링 빈에 등록한다.
+```
+in application.properties
+spring.datasource.url=jdbc:h2:tcp://localhost/~/test
+spring.datasource.username=sa
+spring.datasource.password=
+```
+
+#### 트랜잭션 매니저 - 자동 등록
+* 스프링 부트는 적절한 트랜잭션 매니저(`PlatformTransactionManager`)를 자동으로 스프링 빈에 등록한다.
+* 자동으로 등록되는 스프링 빈 이름: `transactionManager`
+* 참고로 개발자가 직접 트랜잭션 매니저를 빈으로 등록하면 스프링 부트는 트랜잭션 매니저를 자동으로 등록하지 않는다.
+
+어떤 트랜잭션 매니저를 선택할지는 현재 등록된 라이브러리를 보고 판단하는데,
+둘다 사용하는 경우 `JpaTransactionManager` 를 등록한다. 
+참고로 `JpaTransactionManager는` `DataSourceTransactionManager` 가 제공하는 기능도 대부분 지원한다.
+
